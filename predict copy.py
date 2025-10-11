@@ -9,7 +9,7 @@ from sklearn.metrics import r2_score, mean_absolute_error
 #! ############################################################################################################ !#
 #! ---------------------------------------- Generate price change dict ---------------------------------------- !#
 #! ############################################################################################################ !#
-with open('train_gas_price.csv', newline='') as csvfile:
+with open('train_gas_price_full.csv', newline='') as csvfile:
     reader = csv.DictReader(csvfile)
     rows = list(reader)
 
