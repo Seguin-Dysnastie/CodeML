@@ -23,6 +23,7 @@
 import requests
 import csv
 from datetime import datetime, timedelta
+import time
 
 # Config
 URL = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -30,8 +31,8 @@ DOMAINS = [
     "cnn.com", "bloomberg.com", "cnbc.com", "reuters.com",
     "nytimes.com", "theguardian.com", "wsj.com", "forbes.com", "usnews.com"
 ]
-START_DATE = datetime(2017, 1, 1)
-END_DATE = datetime(2019, 12, 31)
+START_DATE = datetime(2020, 1, 1)
+END_DATE = datetime(2025, 12, 31)
 MAX_ARTICLES_PER_DAY = 20
 OUTPUT_FILE = "news_gas_price.csv"
 GAS_PRICE_FILE = "train_henry_hub_natural_gas_spot_price_daily 1.csv"
@@ -89,8 +90,12 @@ with open(OUTPUT_FILE, mode="w", newline="", encoding="utf-8") as f:
                 "sort": "Mentions"          # sort by most mentions / popular
             }
             try:
-                response = requests.get(URL, params=params, timeout=30)
+                response = requests.get(URL, params=params)
                 print(response.url)
+                if response.status_code == 429:
+                    print("Rate limited. Sleeping for 60 seconds...")
+                    time.sleep(60)
+                    continue
                 if response.status_code != 200:
                     print(f"Failed to fetch data for {domain} on {current_date.strftime('%Y-%m-%d')}")
                     continue
