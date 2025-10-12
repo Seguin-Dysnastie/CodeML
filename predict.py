@@ -6,33 +6,34 @@ from sklearn.linear_model import Ridge
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
 
-# -------------------------------------------------------------------------------------------------------------
-# Load price_diff and get last known price
-# -------------------------------------------------------------------------------------------------------------
+#! -------------------------------------------------------------------------------------------------------------- !#
+#! --------------------------------------- Generate price_diff dictionary --------------------------------------- !#
+#! -------------------------------------------------------------------------------------------------------------- !#
+
 with open('train_gas_price.csv', newline='') as csvfile:
     reader = csv.DictReader(csvfile)
     rows = list(reader)
 
-price_diff = {}
 prices = {}
-for i in range(len(rows) - 1):
-    date = rows[i]['date']
-    if not rows[i]['price_usd_per_mmbtu'] or not rows[i + 1]['price_usd_per_mmbtu']:
+for row in rows:
+    date = row['date']
+    if not row['price_usd_per_mmbtu']:
         continue
-    price_today = float(rows[i]['price_usd_per_mmbtu'])
-    price_next = float(rows[i + 1]['price_usd_per_mmbtu'])
-    price_diff[date] = (price_next - price_today)/price_today
-    prices[date] = price_today
+    prices[date] = float(row['price_usd_per_mmbtu'])
 
-# Get last known price in 2018 to start predictions
-last_known_date = max([d for d in prices.keys() if d <= "2018-12-31"])
-last_known_price = prices[last_known_date]
+# Convert prices to DataFrame and weekly aggregation
+price_series = pd.Series(prices)
+price_series.index = pd.to_datetime(price_series.index)
+weekly_prices = price_series.resample('W-FRI').last()  # weekly on Friday
+weekly_log_returns = np.log(weekly_prices).diff().dropna().reset_index()
+weekly_log_returns.columns = ["week_end", "delta_log_price"]
 
-# -------------------------------------------------------------------------------------------------------------
-# Load articles
-# -------------------------------------------------------------------------------------------------------------
+#! -------------------------------------------------------------------------------------------------------------- !#
+#! ---------------------------------------- Generate articles dictionary ---------------------------------------- !#
+#! -------------------------------------------------------------------------------------------------------------- !#
+
 articles = []
-with open("train_articles.csv", mode="r", encoding="utf-8") as f:
+with open("full_train_article.csv", mode="r", encoding="utf-8") as f:
     reader = csv.DictReader(f)
     for row in reader:
         articles.append({
@@ -42,90 +43,80 @@ with open("train_articles.csv", mode="r", encoding="utf-8") as f:
             "country": row["country"]
         })
 
-articles_by_date = {}
-for article in articles:
-    date = article["date"]
-    if date not in articles_by_date:
-        articles_by_date[date] = []
-    articles_by_date[date].append(article)
+articles_df = pd.DataFrame(articles)
+articles_df["date"] = pd.to_datetime(articles_df["date"])
 
-# -------------------------------------------------------------------------------------------------------------
-# Prepare dataset for training (same as before)
-# -------------------------------------------------------------------------------------------------------------
-START_DATE = "2018-01-01"
-END_DATE   = "2018-12-31"
+# Aggregate articles from previous 7 days for each weekly return
+weekly_texts = []
+for _, row in weekly_log_returns.iterrows():
+    week_end = row["week_end"]
+    week_start = week_end - pd.Timedelta(days=6)
+    mask = (articles_df["date"] >= week_start) & (articles_df["date"] <= week_end)
+    text = " ".join((articles_df.loc[mask, "title"] + ". " + articles_df.loc[mask, "domain"] + ". " + articles_df.loc[mask, "country"]).tolist())
+    weekly_texts.append(text)
 
-df = pd.DataFrame(articles)
-df["date"] = pd.to_datetime(df["date"])
-df["text"] = df["title"] + ". " + df["domain"] + ". " + df["country"]
+weekly_log_returns["text"] = weekly_texts
+weekly_log_returns = weekly_log_returns[weekly_log_returns["text"].str.strip() != ""]  # drop empty weeks
 
-mask = (df["date"] >= START_DATE) & (df["date"] <= END_DATE)
-df = df.loc[mask].copy()
+#! -------------------------------------------------------------------------------------------------------------- !#
+#! ------------------------------------- Generate embedding and train model ------------------------------------- !#
+#! -------------------------------------------------------------------------------------------------------------- !#
 
-daily_news = (
-    df.groupby("date")["text"]
-    .apply(lambda x: " ".join(x))
-    .reset_index()
-)
-
-price_df = pd.DataFrame(list(price_diff.items()), columns=["date", "delta_price"])
-price_df["date"] = pd.to_datetime(price_df["date"])
-
-merged = pd.merge(daily_news, price_df, on="date", how="inner")
-if merged.empty:
-    raise ValueError("No overlapping dates between articles and price_diff within the selected range.")
-
-# -------------------------------------------------------------------------------------------------------------
-# Generate embeddings and train
-# -------------------------------------------------------------------------------------------------------------
 model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+X = model.encode(weekly_log_returns["text"].tolist(), show_progress_bar=True)
+y = weekly_log_returns["delta_log_price"].values
 
-X = model.encode(merged["text"].tolist(), show_progress_bar=True)
-y = merged["delta_price"].values
+mean_delta = y.mean()
+print("Mean weekly delta:", mean_delta)
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 reg = Ridge(alpha=1.0)
 reg.fit(X_train, y_train)
 
 y_pred = reg.predict(X_test)
-print("Model performance:")
+print("Weekly model performance:")
 print("R²:", round(r2_score(y_test, y_pred), 3))
-print("MAE:", round(mean_absolute_error(y_test, y_pred), 3), "\n")
+print("MAE:", round(mean_absolute_error(y_test, y_pred), 6), "\n")
 
-# -------------------------------------------------------------------------------------------------------------
-# Predict prices for all dates in 2019
-# -------------------------------------------------------------------------------------------------------------
-from datetime import timedelta, datetime
+#! -------------------------------------------------------------------------------------------------------------- !#
+#! -------------------------------------------- Generate predictions -------------------------------------------- !#
+#! -------------------------------------------------------------------------------------------------------------- !#
 
-start_predict = datetime(2019, 1, 1)
-end_predict = datetime(2019, 12, 31)
+# Load test-template
+test_template = pd.read_csv("test-template.csv")
+test_template["id"] = pd.to_datetime(test_template["id"])
+test_template = test_template.sort_values("id").reset_index(drop=True)
 
-current_price = last_known_price
-predicted_prices = []
+previous_price = float(prices["2019-12-31"])
+predicted_rows = []
 
-current_date = start_predict
-while current_date <= end_predict:
-    date_str = current_date.strftime("%Y-%m-%d")
+# Build weekly ranges covering all test-template dates
+weeks = pd.date_range(start=test_template["id"].min(), end=test_template["id"].max(), freq='W-FRI')
+
+for week_end in weeks:
+    week_start = week_end - pd.Timedelta(days=6)
+    mask = (articles_df["date"] >= week_start) & (articles_df["date"] <= week_end)
+    week_text = " ".join((articles_df.loc[mask, "title"] + ". " + articles_df.loc[mask, "domain"] + ". " + articles_df.loc[mask, "country"]).tolist())
     
-    # Get all articles for that day
-    if date_str in articles_by_date:
-        day_articles = articles_by_date[date_str]
-        day_text = " ".join([a["title"] + ". " + a["domain"] + ". " + a["country"] for a in day_articles])
-        day_embed = model.encode([day_text])
-        predicted_delta = reg.predict(day_embed)[0]
-        # Convert delta to actual price
-        current_price = current_price * (1 + predicted_delta)
-    # If no articles, keep price unchanged
+    if week_text.strip():
+        week_embed = model.encode([week_text])
+        weekly_log_delta = reg.predict(week_embed)[0]
+        # Bias correction
+        weekly_log_delta -= mean_delta
+        # Clip extreme changes to ±10% per week
+        weekly_log_delta = np.clip(weekly_log_delta, -0.10, 0.10)
+    else:
+        weekly_log_delta = 0.0
     
-    predicted_prices.append({
-    "date": date_str,
-    "predicted_price": float(current_price)  # convert from np.float32 to Python float
-})
-    current_date += timedelta(days=1)
+    # Apply weekly delta evenly to days in test_template
+    for single_date in pd.date_range(week_start, week_end):
+        if single_date not in test_template["id"].values:
+            continue
+        predicted_price = previous_price * np.exp(weekly_log_delta / 7)  # distribute delta
+        predicted_rows.append({"id": single_date.strftime("%Y-%m-%d"), "price_usd_per_mmbtu": round(float(predicted_price), 4)})
+        previous_price = predicted_price
 
-# -------------------------------------------------------------------------------------------------------------
-# Show results
-# -------------------------------------------------------------------------------------------------------------
-for p in predicted_prices[:100]:  # preview first 10 days
-    print(p)
-
+# Overwrite test-template.csv with predictions
+predicted_df = pd.DataFrame(predicted_rows)
+predicted_df.to_csv("test-template.csv", index=False)
+print(f"✅ Predicted prices computed for all {len(predicted_df)} dates in test-template.csv.")
