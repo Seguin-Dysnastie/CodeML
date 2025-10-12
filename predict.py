@@ -106,43 +106,65 @@ else:
     previous_price = float(prices[last_price_date])
 
 predicted_rows = []
-
-# Build 3-day periods that cover the test range (end inclusive)
 periods = pd.date_range(start=test_template["id"].min(), end=test_template["id"].max(), freq='3D')
 
-for period_end in periods:
+running_increase_streak = 0
+running_decrease_streak = 0
+weekly_correction_factor = 1.0
+previous_delta = 0
+correction_interval = 3  # roughly once per week (3 * 3-day = ~9 days)
+
+for i, period_end in enumerate(periods):
     period_start = period_end - pd.Timedelta(days=2)
 
-    # Use only previous 3-day articles to predict this period (no future leak)
-    # We choose window_end = period_start (i.e. last day available before this period)
+    # Lookback window for article context
     window_start = period_start - pd.Timedelta(days=2)
     window_end = period_start
-
     mask = (articles_df["date"] >= window_start) & (articles_df["date"] <= window_end)
     text = " ".join((articles_df.loc[mask, "title"] + ". " +
                      articles_df.loc[mask, "domain"] + ". " +
                      articles_df.loc[mask, "country"]).tolist())
 
+    # Predict delta for this 3-day period
     if text.strip():
         embed = model.encode([text])
         log_delta = float(reg.predict(embed)[0])
-        # mild trend correction and expanded allowed range
-        log_delta = log_delta + 0.2 * trend
-        log_delta = float(np.clip(log_delta, -0.15, 0.25))
+        log_delta = log_delta * 1.5 + 0.2 * trend
     else:
-        # fallback: mean_delta + small trend push
-        log_delta = float(np.clip(mean_delta + 0.2 * trend, -0.15, 0.25))
+        log_delta = mean_delta + 0.2 * trend
 
-    # Smooth daily progression inside the 3-day period (exponential weighting)
+    # Clamp excessive changes
+    log_delta = float(np.clip(log_delta, -0.35, 0.35))
+
+    # Detect streak direction
+    if log_delta > 0:
+        running_increase_streak += 1
+        running_decrease_streak = 0
+    elif log_delta < 0:
+        running_decrease_streak += 1
+        running_increase_streak = 0
+
+    # --- WEEKLY CORRECTION LOGIC ---
+    if i % correction_interval == 0 and i > 0:
+        if running_increase_streak >= 2:
+            weekly_correction_factor *= 0.92  # force slight down adjustment
+        elif running_decrease_streak >= 2:
+            weekly_correction_factor *= 1.03  # allow small rebound
+        else:
+            weekly_correction_factor = weekly_correction_factor * 0.98 + 0.02  # light decay
+
+        # Keep factor bounded
+        weekly_correction_factor = float(np.clip(weekly_correction_factor, 0.85, 1.15))
+
+    # Apply correction to delta
+    log_delta *= weekly_correction_factor
+
+    # Smooth daily progression inside 3-day block
     days_in_period = list(pd.date_range(period_start, period_end))
     for j, single_date in enumerate(days_in_period):
-        # only produce predictions for dates that exist in test_template
-        if single_date < test_template["id"].min() or single_date > test_template["id"].max():
-            continue
         if single_date not in test_template["id"].values:
             continue
-        # exponential weight growing across the 3-day block
-        weight = np.exp(j / 1.5) / np.exp((len(days_in_period)-1) / 1.5)
+        weight = np.exp(j / 1.5) / np.exp((len(days_in_period) - 1) / 1.5)
         daily_log_delta = log_delta * weight / max(1, len(days_in_period))
         predicted_price = previous_price * np.exp(daily_log_delta)
 
@@ -150,8 +172,10 @@ for period_end in periods:
             "id": single_date.strftime("%Y-%m-%d"),
             "price_usd_per_mmbtu": round(float(predicted_price), 4)
         })
+        previous_price = predicted_price
 
-        previous_price = predicted_price  # sequentially use predicted price
+    previous_delta = log_delta
+
 
 # Create DataFrame of predictions
 predicted_df = pd.DataFrame(predicted_rows)
