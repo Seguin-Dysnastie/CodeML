@@ -52,7 +52,9 @@ for _, row in weekly_log_returns.iterrows():
     week_end = row["week_end"]
     week_start = week_end - pd.Timedelta(days=6)
     mask = (articles_df["date"] >= week_start) & (articles_df["date"] <= week_end)
-    text = " ".join((articles_df.loc[mask, "title"] + ". " + articles_df.loc[mask, "domain"] + ". " + articles_df.loc[mask, "country"]).tolist())
+    text = " ".join((articles_df.loc[mask, "title"] + ". " +
+                     articles_df.loc[mask, "domain"] + ". " +
+                     articles_df.loc[mask, "country"]).tolist())
     weekly_texts.append(text)
 
 weekly_log_returns["text"] = weekly_texts
@@ -96,27 +98,39 @@ weeks = pd.date_range(start=test_template["id"].min(), end=test_template["id"].m
 for week_end in weeks:
     week_start = week_end - pd.Timedelta(days=6)
     mask = (articles_df["date"] >= week_start) & (articles_df["date"] <= week_end)
-    week_text = " ".join((articles_df.loc[mask, "title"] + ". " + articles_df.loc[mask, "domain"] + ". " + articles_df.loc[mask, "country"]).tolist())
-    
+    week_text = " ".join((articles_df.loc[mask, "title"] + ". " +
+                          articles_df.loc[mask, "domain"] + ". " +
+                          articles_df.loc[mask, "country"]).tolist())
+
     if week_text.strip():
         week_embed = model.encode([week_text])
         weekly_log_delta = reg.predict(week_embed)[0]
         # Bias correction
         weekly_log_delta -= mean_delta
         # Clip extreme changes to ±10% per week
-        weekly_log_delta = np.clip(weekly_log_delta, -0.10, 0.10)
+        weekly_log_delta = np.clip(weekly_log_delta, -0.05, 0.15)
     else:
         weekly_log_delta = 0.0
-    
+
     # Apply weekly delta evenly to days in test_template
     for single_date in pd.date_range(week_start, week_end):
+        if single_date < test_template["id"].min() or single_date > test_template["id"].max():
+            continue
         if single_date not in test_template["id"].values:
             continue
         predicted_price = previous_price * np.exp(weekly_log_delta / 7)  # distribute delta
-        predicted_rows.append({"id": single_date.strftime("%Y-%m-%d"), "price_usd_per_mmbtu": round(float(predicted_price), 4)})
+        predicted_rows.append({
+            "id": single_date.strftime("%Y-%m-%d"),
+            "price_usd_per_mmbtu": round(float(predicted_price), 4)
+        })
         previous_price = predicted_price
 
-# Overwrite test-template.csv with predictions
+# Ensure all dates in test_template are covered
 predicted_df = pd.DataFrame(predicted_rows)
-predicted_df.to_csv("test-template.csv", index=False)
-print(f"✅ Predicted prices computed for all {len(predicted_df)} dates in test-template.csv.")
+predicted_df["id"] = pd.to_datetime(predicted_df["id"])
+
+# If any dates are missing, fill them with previous known price
+full_df = test_template[["id"]].merge(predicted_df, on="id", how="left").fillna(method="ffill")
+
+full_df.to_csv("test-template.csv", index=False)
+print(f"✅ Predicted prices computed for all {len(full_df)} dates in test-template.csv.")

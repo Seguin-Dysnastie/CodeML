@@ -2,21 +2,12 @@ import pandas as pd
 
 import matplotlib.pyplot as plt
 # Load the CSV file
-df = pd.read_csv('test-template.csv')
+df = pd.read_csv('message.csv')
 # Only use the first 200 points
 df = df.head(1434)
 print(df['price_usd_per_mmbtu'].to_list())
 # Assuming the column with prices is named 'price'
 plt.figure(figsize=(10, 6))
-
-# Load the prices from message.csv
-df_msg = pd.read_csv('message.csv')
-df_msg = df_msg.head(1434)
-plt.plot(df_msg['price_usd_per_mmbtu'], marker='x', markersize=1, label='message.csv')
-
-# Add label for test-template.csv
-plt.plot(df['price_usd_per_mmbtu'], marker='o', markersize=1, label='test-template.csv')
-plt.legend()
 plt.plot(df['price_usd_per_mmbtu'], marker='o', markersize=1)
 plt.title('Prices from test-template.csv')
 plt.xlabel('Index')
